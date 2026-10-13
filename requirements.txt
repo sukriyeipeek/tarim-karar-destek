@@ -1,0 +1,38 @@
+# Python 3.10 veya üstü gerekir (kod `int | None` gibi yazımlar kullanıyor). 3.11 ile test edildi.
+
+# Web API
+fastapi==0.122.0
+uvicorn[standard]==0.38.0
+pydantic[email]==2.12.5
+python-dotenv==1.2.1
+
+# Veritabanı
+sqlalchemy==2.0.44
+pymysql==1.2.0
+alembic==1.17.2
+
+# Güvenlik
+passlib[bcrypt]==1.7.4
+bcrypt==4.3.0
+
+# Veri ve modeller
+pandas==2.3.1
+numpy==2.2.6
+scikit-learn==1.7.2
+catboost==1.2.10
+xgboost==3.1.2
+joblib==1.5.2
+pulp==3.3.2
+
+# Dış veri kaynakları
+requests==2.32.3
+beautifulsoup4==4.13.4
+evds==0.4.0
+
+# Ham veri işleme betikleri (Excel okuma)
+openpyxl==3.1.5
+xlrd==2.0.2
+
+# Test
+pytest==9.1.1
+httpx==0.28.1
