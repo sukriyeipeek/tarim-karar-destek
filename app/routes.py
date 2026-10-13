@@ -13,7 +13,7 @@ from app.services.risk import sezon_cevir,hedef_yil_belirle,risk_hesapla
 from app.services.profit_service import kar_hesaplama_son
 from app.services.price_prediction import predict_product_price
 from app.services.optimization_plan import create_plan_for_user_fields
-from app.services.hal_price_service import fetch_daily_hal_prices
+from app.services.hal_price_service import get_hal_prices
 
 # İşlem yollarını ayıran Router objemiz
 router = APIRouter()
@@ -511,10 +511,7 @@ def oneri_onayla(veri: schemas.OnerıOnaylaRequest, db: Session=Depends(get_db))
 @router.get("/istatistikler/hal-fiyatlari")
 def get_daily_hal_prices():
     try:
-        data = fetch_daily_hal_prices()
-
-        return data
-
+        return get_hal_prices()
     except Exception as error:
         raise HTTPException(
             status_code=500,

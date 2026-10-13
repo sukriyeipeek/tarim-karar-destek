@@ -436,6 +436,7 @@ button {
 
 .form-message.error { background: #FBE7E7; color: var(--danger); }
 .form-message.success { background: #E7F3E4; color: var(--ok); }
+.form-message.info { background: var(--wheat); color: var(--soil); border: 1px solid var(--wheat-deep); margin-bottom: 16px; }
 
 /* ---------- Analysis pages (Fiyat / Kâr / Risk) ---------- */
 .analysis-header { margin-bottom: 28px; }
@@ -991,10 +992,11 @@ button {
 }
 .price-status {
   display: inline-block;
-  padding: 1px 1px;
+  padding: 3px 10px;
   border-radius: 99px;
-  font-size: 6px;
-  font-weight: 70;
+  font-size: 0.75rem;
+  font-weight: 600;
+  white-space: nowrap;
 }
 
 .price-status.current {
@@ -1005,6 +1007,11 @@ button {
 .price-status.missing {
   background: #fff3cd;
   color: #856404;
+}
+
+.price-status.stale {
+  background: var(--wheat);
+  color: var(--soil);
 }
 .price-table tbody tr {
   height: auto;

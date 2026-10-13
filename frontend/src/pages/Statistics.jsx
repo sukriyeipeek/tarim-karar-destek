@@ -6,6 +6,8 @@ function Statistics() {
   const [yukleniyor, setYukleniyor] = useState(true);
   const [hata, setHata] = useState("");
   const [veriTarihi, setVeriTarihi] = useState("");
+  const [canliVeri, setCanliVeri] = useState(true);
+  const [bilgiMesaji, setBilgiMesaji] = useState("");
 
   const isFetched = useRef(false);
 
@@ -32,6 +34,8 @@ function Statistics() {
 
         setFiyatlar(gelenFiyatlar);
         setVeriTarihi(data.date || "");
+        setCanliVeri(data.is_live !== false);
+        setBilgiMesaji(data.message || "");
       } catch {
         setHata("Hal fiyatları yüklenemedi.");
       } finally {
@@ -80,10 +84,14 @@ function Statistics() {
 
         {veriTarihi && (
           <p className="statistics-date">
-            Veri tarihi: <strong>{veriTarihi}</strong>
+            {canliVeri ? "Veri tarihi" : "Son veri tarihi"}: <strong>{veriTarihi}</strong>
           </p>
         )}
       </div>
+
+      {bilgiMesaji && (
+        <div className="form-message info">{bilgiMesaji}</div>
+      )}
 
       <div className="statistics-toolbar">
         <input
@@ -105,6 +113,7 @@ function Statistics() {
               <th>En Az</th>
               <th>En Çok</th>
               <th>Ortalama</th>
+              <th>Durum</th>
             </tr>
           </thead>
 
@@ -124,7 +133,7 @@ function Statistics() {
         {item.average_price !== null ? `${Number(item.average_price).toFixed(2)} TL` : "-"}
       </td>
       <td>
-        <span className={item.price_found ? "price-status current" : "price-status missing"}>
+        <span className={`price-status ${!item.price_found ? "missing" : item.is_current ? "current" : "stale"}`}>
           {item.note}
         </span>
       </td>
