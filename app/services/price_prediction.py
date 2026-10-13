@@ -1,57 +1,36 @@
+
 from __future__ import annotations
 
 from datetime import date
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
-import numpy as np
-import joblib
-import pandas as pd
 
+import numpy as np
+import pandas as pd
 from catboost import CatBoostRegressor
 
-from sklearn.metrics import (
-    mean_absolute_error,
-    mean_absolute_percentage_error,
-    r2_score,
-    root_mean_squared_error,
-)
-from sklearn.model_selection import train_test_split
-
-from app.services.fertilizer_service import get_commodity_price
-from app.services.fuel_service import predict_fuel_price
-from app.services.inflation_service import predict_inflation
+from app.services.inflation_service import load_raw_inflation_data, predict_inflation
 
 
-DATASET_PATH = Path("data/processed/data_files/final_price_dataset.csv")
-MODEL_PATH = Path("models/price_model_catboost.pkl")
-
-TARGET_COLUMN = "average_price"
-
-CATEGORICAL_FEATURES = ["product_name", "season","product_season","season_year"]
-
-NUMERIC_FEATURES = [
-    "year",
-    "fertilizer_price",
-    "fuel_price",
-    "annual_inflation",
-    "planted_area",
-    "production_amount",
-    "lag_1_price",
-    "lag_4_price",
-    "lag_8_price",
-    "same_season_growth",
-]
-
-FEATURE_COLUMNS = CATEGORICAL_FEATURES + NUMERIC_FEATURES
+ROOT_DIR = Path(__file__).resolve().parent.parent.parent
+DATASET_PATH = ROOT_DIR / "data" / "processed" / "data_files" / "final_price_dataset.csv"
+MODEL_PATH = ROOT_DIR / "models" / "price_model_catboost.cbm"
 
 SEASON_ORDER = {
-    "Winter": 1,
-    "Spring": 2,
-    "Summer": 3,
-    "Fall": 4,
+    "Winter": 0,
+    "Spring": 1,
+    "Summer": 2,
+    "Fall": 3,
 }
+SEASON_SEQUENCE = list(SEASON_ORDER)
 
-SEASON_SEQUENCE = ["Winter", "Spring", "Summer", "Fall"]
+CATEGORICAL_FEATURES = ["product_name", "season"]
+FEATURE_COLUMNS = [*CATEGORICAL_FEATURES, "years_back"]
+
+
+TRAINING_YEARS_BACK = (1, 2)
+MAX_YEARS_BACK = 5
 
 
 def validate_season(season: str) -> str:
@@ -66,32 +45,30 @@ def validate_season(season: str) -> str:
     return season
 
 
-def season_sort_value(season: str) -> int:
-    season = validate_season(season)
-    return SEASON_ORDER[season]
+def to_period(year: int, season: str) -> int:
+    """Number of seasons since year 0, so that period - 4 is the same season a year earlier."""
+    return int(year) * 4 + SEASON_ORDER[validate_season(season)]
+
+
+def from_period(period: int) -> tuple[int, str]:
+    return period // 4, SEASON_SEQUENCE[period % 4]
 
 
 def get_current_season(today: date | None = None) -> tuple[int, str]:
     if today is None:
         today = date.today()
 
-    year = today.year
     month = today.month
-
     if month in [12, 1, 2]:
-        return year, "Winter"
+        return today.year, "Winter"
     if month in [3, 4, 5]:
-        return year, "Spring"
+        return today.year, "Spring"
     if month in [6, 7, 8]:
-        return year, "Summer"
-
-    return year, "Fall"
+        return today.year, "Summer"
+    return today.year, "Fall"
 
 
 def get_target_year(target_season: str, today: date | None = None) -> int:
-    if today is None:
-        today = date.today()
-
     target_season = validate_season(target_season)
     current_year, current_season = get_current_season(today)
 
@@ -101,277 +78,218 @@ def get_target_year(target_season: str, today: date | None = None) -> int:
     return current_year + 1
 
 
-def load_dataset(dataset_path: Path = DATASET_PATH) -> pd.DataFrame:
+def load_prices(dataset_path: Path = DATASET_PATH) -> dict[tuple[str, int], float]:
+    """Average price per (product, period). Lags are derived from periods, never from row order."""
     if not Path(dataset_path).exists():
         raise FileNotFoundError(f"Dataset bulunamadi: {dataset_path}")
 
-    df = pd.read_csv(dataset_path)
+    df = pd.read_csv(dataset_path, usecols=["product_name", "year", "season", "average_price"])
+    df["average_price"] = pd.to_numeric(df["average_price"], errors="coerce")
+    df = df.dropna(subset=["average_price"])
+    df = df[df["average_price"] > 0]
 
-    df["product_season"] = (
-    df["product_name"].astype(str) + "_" + df["season"].astype(str)
-)
+    return {
+        (str(row.product_name), to_period(row.year, row.season)): float(row.average_price)
+        for row in df.itertuples()
+    }
 
-    df["season_year"] = (
-    df["season"].astype(str) + "_" + df["year"].astype(str))
-    df["lag_8_price"] = (
-    df.groupby("product_name")[TARGET_COLUMN]
-    .shift(8)
-)   
-    df["same_season_growth"] = np.where(
-    df["lag_8_price"] > 0,
-    (df["lag_4_price"] - df["lag_8_price"]) / df["lag_8_price"],
-    np.nan,
-) 
-    
-    df["same_season_growth"] = df.groupby("product_name")["same_season_growth"].transform(
-    lambda series: series.fillna(series.median())
-)
 
-    df["same_season_growth"] = df["same_season_growth"].fillna(
-    df["same_season_growth"].median()
-)
-    df = df.dropna(subset=[
-    "lag_1_price",
-    "lag_4_price",
-])
-    required_columns = [TARGET_COLUMN, *FEATURE_COLUMNS]
-    missing_columns = [
-        column for column in required_columns
-        if column not in df.columns
-    ]
+@lru_cache(maxsize=1)
+def get_prices() -> dict[tuple[str, int], float]:
+    return load_prices()
 
-    if missing_columns:
-        raise ValueError(f"Dataset eksik kolon iceriyor: {missing_columns}")
 
-    df["product_name"] = df["product_name"].astype(str)
-    df["season"] = df["season"].astype(str).apply(validate_season)
+@lru_cache(maxsize=1)
+def get_actual_inflation() -> dict[int, float]:
+    df = load_raw_inflation_data()
+    return {
+        to_period(row.year, row.season): float(row.annual_inflation)
+        for row in df.itertuples()
+    }
 
-    for column in NUMERIC_FEATURES + [TARGET_COLUMN]:
-        df[column] = pd.to_numeric(df[column], errors="coerce")
 
-    df = df.dropna(subset=[TARGET_COLUMN, *FEATURE_COLUMNS])
-    df["year"] = df["year"].astype(int)
+@lru_cache(maxsize=64)
+def get_inflation(period: int) -> float:
+    """Annual inflation (%) for a period: the recorded value if known, otherwise the forecast."""
+    actual = get_actual_inflation()
+    if period in actual:
+        return actual[period]
 
-    return df
+    year, season = from_period(period)
+    return float(predict_inflation(year, season))
+
+
+def expected_log_growth(years_back: int, annual_inflation: float) -> float:
+    return years_back * float(np.log1p(annual_inflation / 100))
+
+
+def find_base_period(
+    prices: dict[tuple[str, int], float],
+    product_name: str,
+    target_period: int,
+    last_known_period: int | None = None,
+) -> tuple[int, int] | None:
+    """Latest same-season period with a known price, at least a year before the target."""
+    for years_back in range(1, MAX_YEARS_BACK + 1):
+        base_period = target_period - 4 * years_back
+        if last_known_period is not None and base_period > last_known_period:
+            continue
+        if (product_name, base_period) in prices:
+            return base_period, years_back
+    return None
+
+
+def build_training_frame(
+    prices: dict[tuple[str, int], float],
+    inflation: dict[int, float],
+    last_period: int | None = None,
+) -> tuple[pd.DataFrame, np.ndarray]:
+    """One example per observed price and years_back; the target is the change the inflation baseline missed."""
+    rows, targets = [], []
+    for (product_name, period), price in prices.items():
+        if last_period is not None and period > last_period:
+            continue
+        if period not in inflation:
+            continue
+
+        for years_back in TRAINING_YEARS_BACK:
+            base_price = prices.get((product_name, period - 4 * years_back))
+            if base_price is None:
+                continue
+
+            rows.append(
+                {
+                    "product_name": product_name,
+                    "season": from_period(period)[1],
+                    "years_back": years_back,
+                }
+            )
+            targets.append(
+                float(np.log(price / base_price))
+                - expected_log_growth(years_back, inflation[period])
+            )
+
+    if not rows:
+        raise ValueError("Egitim icin yeterli fiyat gecmisi bulunamadi.")
+
+    return pd.DataFrame(rows, columns=FEATURE_COLUMNS), np.array(targets)
 
 
 def build_price_model() -> CatBoostRegressor:
+    # Deliberately small: with ~15 products and ~12 years, deeper models learned
+    # one-off price shocks (e.g. 2022) and repeated them in later years.
     return CatBoostRegressor(
-        iterations=700,
+        iterations=200,
         learning_rate=0.03,
-        depth=6,
+        depth=2,
+        l2_leaf_reg=20,
         loss_function="RMSE",
         random_seed=42,
         verbose=False,
+        allow_writing_files=False,
     )
 
 
-def get_cat_feature_indices() -> list[int]:
-    return [
-        FEATURE_COLUMNS.index(column)
-        for column in CATEGORICAL_FEATURES
-    ]
-
-
-def train_price_model(
-    dataset_path: Path = DATASET_PATH,
-    model_path: Path = MODEL_PATH,
-) -> dict[str, float]:
-    df = load_dataset(dataset_path)
-
-    x = df[FEATURE_COLUMNS]
-    y = df[TARGET_COLUMN]
-
-    x_train, x_test, y_train, y_test = train_test_split(
-        x,
-        y,
-        test_size=0.2,
-        random_state=42,
-    )
-
+def fit_price_model(features: pd.DataFrame, targets: np.ndarray) -> CatBoostRegressor:
     model = build_price_model()
+    model.fit(features, targets, cat_features=CATEGORICAL_FEATURES)
+    return model
 
-    model.fit(
-        x_train,
-        y_train,
-        cat_features=get_cat_feature_indices(),
-    )
 
-    predictions = model.predict(x_test)
-    predictions = [max(0.0, float(p)) for p in predictions]
-
-    metrics = {
-        "mae": round(float(mean_absolute_error(y_test, predictions)), 4),
-        "rmse": round(float(root_mean_squared_error(y_test, predictions)), 4),
-        "mape": round(
-            float(mean_absolute_percentage_error(y_test, predictions) * 100),
-            2,
-        ),
-        "r2": round(float(r2_score(y_test, predictions)), 4)
-        if len(y_test) > 1
-        else 0.0,
-        "row_count": float(len(df)),
-    }
+def train_price_model(model_path: Path = MODEL_PATH) -> CatBoostRegressor:
+    features, targets = build_training_frame(get_prices(), get_actual_inflation())
+    model = fit_price_model(features, targets)
 
     model_path.parent.mkdir(parents=True, exist_ok=True)
-    joblib.dump(model, model_path)
+    model.save_model(str(model_path))
+    return model
 
-    return metrics
 
-
-def load_or_train_model(
-    dataset_path: Path = DATASET_PATH,
-    model_path: Path = MODEL_PATH,
-) -> CatBoostRegressor:
-    if not Path(model_path).exists():
-        train_price_model(
-            dataset_path=dataset_path,
-            model_path=model_path,
+@lru_cache(maxsize=1)
+def get_price_model() -> CatBoostRegressor:
+    if not MODEL_PATH.exists():
+        raise FileNotFoundError(
+            f"Fiyat modeli bulunamadi: {MODEL_PATH}. "
+            "Egitmek icin: python -m app.services.price_prediction"
         )
 
-    return joblib.load(model_path)
+    model = CatBoostRegressor()
+    model.load_model(str(MODEL_PATH))
+    return model
 
 
-def get_product_history(df: pd.DataFrame, product_name: str) -> pd.DataFrame:
-    product_df = df[
-        df["product_name"].astype(str).str.lower() == product_name.lower()
-    ].copy()
-
-    if product_df.empty:
-        raise ValueError(f"{product_name} icin gecmis fiyat verisi bulunamadi.")
-
-    product_df["_season_order"] = product_df["season"].map(season_sort_value)
-
-    return product_df.sort_values(
-        ["year", "_season_order"]
-    ).reset_index(drop=True)
-    
-def get_lag_prices(product_history: pd.DataFrame) -> tuple[float, float, float]:
-    history = product_history.sort_values(["year", "_season_order"]).copy()
-
-    prices = history["average_price"].dropna().tolist()
-
-    if not prices:
-        raise ValueError("Bu ürün için geçmiş fiyat bilgisi bulunamadı.")
-
-    lag_1_price = prices[-1]
-    lag_4_price = prices[-4] if len(prices) >= 4 else lag_1_price
-    lag_8_price = prices[-8] if len(prices) >= 8 else lag_4_price
-
-    return lag_1_price, lag_4_price, lag_8_price
-def latest_or_given(
-    product_history: pd.DataFrame,
-    column: str,
-    value: float | None,
-) -> float:
-    if value is not None:
-        return float(value)
-
-    return float(product_history.iloc[-1][column])
-
-
-def get_fuel_for_period(target_year: int, target_season: str) -> float:
-    return float(predict_fuel_price(target_year, target_season))
-
-
-def get_inflation_for_period(target_year: int, target_season: str) -> float:
-    return float(predict_inflation(target_year, target_season))
-
-
-def build_prediction_input(
+def forecast_price(
+    model: CatBoostRegressor,
     product_name: str,
-    product_history: pd.DataFrame,
-    target_year: int,
+    base_price: float,
     target_season: str,
-    fertilizer_price: float,
-) -> dict[str, Any]:
-    target_season = validate_season(target_season)
-    lag_1_price, lag_4_price, lag_8_price = get_lag_prices(product_history)
-    fuel_price = get_fuel_for_period(target_year, target_season)
-    annual_inflation = get_inflation_for_period(target_year, target_season)
-    same_season_growth = (
-    (lag_4_price - lag_8_price) / lag_8_price
-    if lag_8_price > 0
-    else 0
-)
-    return {
-        "product_name": product_name,
-        "season": target_season,
-        "year": int(target_year),
-        "fertilizer_price": float(fertilizer_price),
-        "fuel_price": float(fuel_price),
-        "annual_inflation": float(annual_inflation),
-        "planted_area": latest_or_given(product_history, "planted_area", None),
-        "production_amount": latest_or_given(product_history, "production_amount", None),
-        "product_season": f"{product_name}_{target_season}",
-        "season_year": f"{target_season}_{int(target_year)}",
-        "lag_1_price": lag_1_price,
-        "lag_4_price": lag_4_price,
-        "lag_8_price": lag_8_price,
-        "same_season_growth": same_season_growth,
-    }
+    years_back: int,
+    annual_inflation: float,
+) -> tuple[float, float]:
+    """Returns (predicted price, model adjustment in log space)."""
+    features = pd.DataFrame(
+        [{"product_name": product_name, "season": target_season, "years_back": years_back}],
+        columns=FEATURE_COLUMNS,
+    )
+    adjustment = float(model.predict(features)[0])
+    predicted = base_price * np.exp(expected_log_growth(years_back, annual_inflation) + adjustment)
+    return float(predicted), adjustment
 
 
 def predict_product_price(
     product_name: str,
     target_season: str,
-    dataset_path: Path = DATASET_PATH,
-    model_path: Path = MODEL_PATH,
+    today: date | None = None,
 ) -> dict[str, Any]:
-    df = load_dataset(dataset_path)
-    product_history = get_product_history(df, product_name)
+    target_season = validate_season(target_season)
+    target_year = get_target_year(target_season, today)
+    target_period = to_period(target_year, target_season)
 
-    target_year = get_target_year(target_season)
-    fertilizer_price = float(get_commodity_price("urea"))
+    prices = get_prices()
+    base = find_base_period(prices, product_name, target_period)
+    if base is None:
+        raise ValueError(
+            f"{product_name} icin {target_season} sezonunda gecmis fiyat verisi bulunamadi."
+        )
 
-    input_row = build_prediction_input(
+    base_period, years_back = base
+    base_price = prices[(product_name, base_period)]
+    annual_inflation = get_inflation(target_period)
+
+    predicted_price, adjustment = forecast_price(
+        get_price_model(),
         product_name=product_name,
-        product_history=product_history,
-        target_year=target_year,
+        base_price=base_price,
         target_season=target_season,
-        fertilizer_price=fertilizer_price,
-    )
-
-    model = load_or_train_model(
-        dataset_path=dataset_path,
-        model_path=model_path,
-    )
-
-    prediction_df = pd.DataFrame([input_row])[FEATURE_COLUMNS]
-
-    predicted_price = round(
-        max(0.0, float(model.predict(prediction_df)[0])),
-        2,
+        years_back=years_back,
+        annual_inflation=annual_inflation,
     )
 
     return {
-        **input_row,
-        "predicted_price": predicted_price,
+        "product_name": product_name,
+        "season": target_season,
+        "year": target_year,
+        "base_year": from_period(base_period)[0],
+        "base_price": round(base_price, 2),
+        "years_back": years_back,
+        "annual_inflation": round(annual_inflation, 2),
+        "model_adjustment": round(adjustment, 4),
+        "predicted_price": round(max(0.0, predicted_price), 2),
     }
 
 
 if __name__ == "__main__":
-    metrics = train_price_model()
+    train_price_model()
+    get_price_model.cache_clear()
+    print(f"Model kaydedildi: {MODEL_PATH}")
+    print("Dogruluk olcumu icin: python -m app.scripts.price_backtest\n")
 
-    print("\nCatBoost Model Test Metrikleri")
-    print("------------------------------")
-    print(f"MAE  : {metrics['mae']}")
-    print(f"RMSE : {metrics['rmse']}")
-    print(f"MAPE : %{metrics['mape']}")
-    print(f"R2   : {metrics['r2']}")
-    print(f"Satir sayisi: {int(metrics['row_count'])}")
-    urunler=["DOMATES SALKIM",
-             "BAKLA",
-             "KARPUZ",
-             "BIBER SIVRI",
-             "KARNABAHAR",
-             "BROKOLI"]
-    season=["Winter","Spring","Summer","Fall"]
-    for i in urunler:
-        for j in season:
-            result = predict_product_price( i,j)
-            print(f"Urun          : {result['product_name']}")
-            print(f"Yil           : {result['year']}")
-            print(f"Sezon         : {result['season']}")
-            print(f"Tahmini Fiyat : {result['predicted_price']} TL")
-
+    for product in ["DOMATES SALKIM", "BAKLA", "KARPUZ", "BIBER SIVRI", "KARNABAHAR", "BROKOLI"]:
+        for season in SEASON_SEQUENCE:
+            result = predict_product_price(product, season)
+            print(
+                f"{product:<16} {result['season']:<7} {result['year']}  "
+                f"{result['predicted_price']:>7} TL  "
+                f"(taban {result['base_year']}: {result['base_price']} TL, "
+                f"enflasyon %{result['annual_inflation']})"
+            )

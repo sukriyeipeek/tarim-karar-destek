@@ -6,7 +6,8 @@ from datetime import date
 from bs4 import BeautifulSoup
 from app.services.get_usd import get_usd_try
 
-CACHE_FILE = Path("commodity_prices.json")
+# Absolute, so the cache is the same file whichever directory the app is started from.
+CACHE_FILE = Path(__file__).resolve().parent.parent.parent / "commodity_prices.json"
 
 
 def load_cache():
@@ -70,5 +71,3 @@ def get_commodity_price(commodity):
 
     return price
 
-
-price = get_commodity_price("urea")

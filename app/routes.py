@@ -329,9 +329,11 @@ def tahmin_fiyat(veri: schemas.FiyatTahminRequest,db: Session=Depends(get_db)):
     if not urun_kaydi:
         raise HTTPException(status_code=404,detail="Urun bulanamdi..")
 
-    hedef_sezon = sezon_cevir(veri.sezon)
-
-    sonuc = predict_product_price(product_name=veri.urun,target_season=hedef_sezon)
+    try:
+        hedef_sezon = sezon_cevir(veri.sezon)
+        sonuc = predict_product_price(product_name=veri.urun,target_season=hedef_sezon)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
     return {
         "sezon":veri.sezon,
